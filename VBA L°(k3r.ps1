@@ -159,6 +159,101 @@ function Protect-VBABinary {
         L "backup — $bakSz bytes" "bytes"
     }
 
+    # ── Bifurcação para .xls (OLE Binary) ──────────────────────────────────────
+    $ext = [System.IO.Path]::GetExtension($path).ToLower()
+    if ($ext -eq ".xls" -or $ext -eq ".xlt") {
+        L "formato legacy .xls detectado (OLE Binary)" "info"
+        L "processando arquivo como bloco unico" "info"
+        
+        $raw = [System.IO.File]::ReadAllBytes($path)
+        
+        # Extração do CLSID (a mesma lógica funciona pois o texto está em ASCII no OLE)
+        $projText = [System.Text.Encoding]::GetEncoding(1252).GetString($raw)
+        $clsidMatch = [regex]::Match($projText, 'ID="\{([^}]+)\}"')
+        $currentCLSID = if ($clsidMatch.Success) { "{$($clsidMatch.Groups[1].Value)}" } else { "{00000000-0000-0000-0000-000000000000}" }
+        L "CLSID atual: $currentCLSID" "info"
+
+        $hasCMG = $projText -match 'CMG="([^"]+)"'
+        $hasDPB = $projText -match 'DPB="([^"]+)"'
+        $hasGC  = $projText -match 'GC="([^"]+)"'
+
+        if (-not ($hasCMG -and $hasDPB -and $hasGC)) {
+            L "CMG/DPB/GC não encontrados — arquivo pode não ter VBA ou já estar em formato incompatível" "err"
+            return $log
+        }
+
+        L "estrutura CMG/DPB/GC localizada ✓" "ok"
+        L "calculando hash SHA1 da senha..." "info"
+
+        $newCLSID = "{00000000-0000-0000-0000-000000000000}"
+
+        # Gera CMG, DPB, GC usando as funções que já existem no topo do script
+        $cmgBytes = & $OVBA_EncryptCMG $newCLSID ([uint32]1)
+        $cmgHex   = ($cmgBytes | ForEach-Object { $_.ToString("X2") }) -join ""
+        
+        $dpbBytes = & $OVBA_EncryptDPB $newCLSID $password
+        $dpbHex   = ($dpbBytes | ForEach-Object { $_.ToString("X2") }) -join ""
+        
+        $gcBytes = & $OVBA_EncryptGC $newCLSID (-not $hideProject)
+        $gcHex   = ($gcBytes | ForEach-Object { $_.ToString("X2") }) -join ""
+
+        L "injetando proteção via byte-level injection" "info"
+
+        # A mesma lógica de injeção de tamanho fixo, aplicada no arquivo inteiro
+        $newRaw = $raw
+        $propertiesToReplace = @(
+            @{ Name="CMG"; NewValue=$cmgHex },
+            @{ Name="DPB"; NewValue=$dpbHex },
+            @{ Name="GC";  NewValue=$gcHex }
+        )
+
+        foreach ($prop in $propertiesToReplace) {
+            $searchPattern = [System.Text.Encoding]::ASCII.GetBytes("$($prop.Name)=""")
+            $quoteByte = [System.Text.Encoding]::ASCII.GetBytes('"')[0]
+            
+            $startIdx = -1
+            for ($i = 0; $i -lt $newRaw.Length - $searchPattern.Length; $i++) {
+                $match = $true
+                for ($j = 0; $j -lt $searchPattern.Length; $j++) {
+                    if ($newRaw[$i+$j] -ne $searchPattern[$j]) { $match = $false; break }
+                }
+                if ($match) { $startIdx = $i + $searchPattern.Length; break }
+            }
+
+            if ($startIdx -ne -1) {
+                $endIdx = $startIdx
+                while ($endIdx -lt $newRaw.Length -and $newRaw[$endIdx] -ne $quoteByte) { $endIdx++ }
+
+                $oldLength = $endIdx - $startIdx
+                $newValueBytes = [System.Text.Encoding]::ASCII.GetBytes($prop.NewValue)
+                
+                $paddedValue = [byte[]]::new($oldLength)
+                if ($newValueBytes.Length -ge $oldLength) {
+                    [Array]::Copy($newValueBytes, 0, $paddedValue, 0, $oldLength)
+                } else {
+                    [Array]::Copy($newValueBytes, 0, $paddedValue, 0, $newValueBytes.Length)
+                }
+
+                [Array]::Copy($paddedValue, 0, $newRaw, $startIdx, $oldLength)
+                L "$($prop.Name) injetado com sucesso ✓" "ok"
+            } else {
+                L "$($prop.Name) não encontrado no stream binário" "err"
+            }
+        }
+
+        # Salva direto por cima do .xls
+        [System.IO.File]::WriteAllBytes($path, $newRaw)
+        $finalSz = (Get-Item $path).Length
+        
+        L "─────────────────────────────────────" "info"
+        L "arquivo final: $finalSz bytes" "bytes"
+        L "proteção VBA aplicada com sucesso ✓" "ok"
+        
+        # Retorna cedo! Não executa a lógica de ZIP abaixo.
+        return $log 
+    }
+    # ── Fim da bifurcação .xls ─────────────────────────────────────────────────
+
     $origSz = (Get-Item $path).Length
     L "arquivo original: $origSz bytes" "bytes"
     L "descompactando container ZIP..." "info"
