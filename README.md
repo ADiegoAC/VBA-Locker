@@ -1,0 +1,2 @@
+VBA L°(k3r | PowerShell WPF App
+Lock Excel VBA projects at the binary level. Stop VBA password bypasses with standard hex editors. This tool injects MS-OVBA compliant SHA-1 encrypted hashes directly into the vbaProject.bin stream using fixed-size byte replacement, ensuring macros remain functional while the VBA editor remains locked. Features a modern dark WPF UI with drag-and-drop and real-time execution logs.
